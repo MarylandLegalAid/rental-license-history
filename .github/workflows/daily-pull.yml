@@ -1,0 +1,58 @@
+name: Daily license pull
+
+on:
+  schedule:
+    - cron: "17 11 * * *" # 11:17 UTC, early morning in Maryland
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Record the pull even if guardrails trip (row count jump or field change)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: daily-pull
+  cancel-in-progress: false
+
+jobs:
+  pull:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Tests
+        run: python -m unittest discover -s tests -t .
+
+      - name: Pull license data
+        run: python -m rlh scrape ${{ inputs.force && '--force' || '' }}
+
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add jurisdictions
+          git commit -m "Pull $(date -u +%Y-%m-%d)"
+          git push
+
+      - name: Build SQLite
+        run: python -m rlh build-sqlite --out build/rental_licenses.sqlite
+
+      - name: Publish SQLite to the data-latest release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="Built $(date -u +%Y-%m-%dT%H:%M:%SZ) from commit ${GITHUB_SHA::7}."
+          if gh release view data-latest >/dev/null 2>&1; then
+            gh release edit data-latest --notes "$notes"
+          else
+            gh release create data-latest --title "Latest SQLite build" --notes "$notes"
+          fi
+          gh release upload data-latest build/rental_licenses.sqlite --clobber
